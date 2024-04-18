@@ -1,0 +1,1065 @@
+---
+title: "DASC 5420 - Cancer Survivability Prediction Using Machine Learning Techniques"
+author: "Thai Pham - T00727094
+ Bardelosa, John Joshua - T00728432"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Load the necessary library
+
+```{r, message = FALSE}
+# install and call required library
+pkg_list = c("dplyr","tidyverse","ISLR","ISLR2", "caret","ModelMetrics","corrplot", 'ggpubr', 'glmnet','GGally', 'class', 'boot', 'kernlab', 'pROC','tinytex','ggplot2','pls','reshape2','e1071','randomForest','gbm','neuralnet',"purrr")
+# Install packages if needed
+for (pkg in pkg_list)
+{# Try loading the library.
+if ( ! library(pkg, logical.return=TRUE, character.only=TRUE) )
+{
+# If the library cannot be loaded, install it; then load.
+install.packages(pkg)
+library(pkg, character.only=TRUE)
+}
+}
+```
+
+# 1. Load the data and perform EDA
+```{r}
+data<-read.csv("kaggle_to_students.csv")
+glimpse(data)
+missing_values<-sum(is.na(data))
+missing_values
+```
+## a) Statistic summary
+```{r}
+summary(data)
+```
+## b) Plots
+
+```{r}
+# Remove 'Patient' column
+data_no_patient <- data[, !names(data) %in% c("Patient")]
+
+# Create a list to store histograms
+histogram_list <- list()
+
+# Iterate over columns and create histograms
+for(col in names(data_no_patient)) {
+  histogram <- ggplot(data, aes_string(x = col, fill = factor(data$eventdeath))) +
+    geom_histogram(binwidth = 1, color = "black", position = "dodge", alpha = 0.7) +
+    labs(title = paste("Histogram of", col, "by Event Death"),
+         x = col,
+         y = "Frequency",
+         fill = "Event Death") +
+    theme_minimal()
+  
+  print(histogram)
+}
+```
+```{r}
+# Explore the variable "eventdeath"
+barplot(table(data$eventdeath), main = "Barplot of Event Death", xlab = "Event Death", ylab = "Frequency")
+table(data$eventdeath)
+```
+Note that there is an imbalanced data in variable "eventdeath"!!!
+
+## c) Correlation checking
+```{r}
+# Calculate the correlation matrix
+correlation_matrix <- cor(data[, !colnames(data) %in% "Patient"])
+
+# Melt correlation matrix for ggplot2
+correlation_df <- melt(correlation_matrix)
+
+# Plot heatmap
+ggplot(correlation_df, aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Correlation") +
+  geom_text(aes(label = round(value, 2)), color = "black") + # Add annotation
+  theme_minimal() + # Simple theme
+  labs(title = "Correlation Heatmap", x = "", y = "") + # Add titles
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 10, hjust = 1)) # Rotate x-axis labels
+```
+
+## d) Feature engineering
+```{r}
+# Drop the column Patient
+cancer<-data[,-1]
+cancer
+```
+
+```{r}
+# Transform age into age groups
+cancer$age_group <- cut(cancer$age, breaks = c(25, 30, 35, 40, 45, 50, 55), include.lowest = TRUE, labels = c("25_29", "30_34", "35_39", "40_44", "45_49", "50_54"))
+# Convert variables to factor
+cancer$chemo <- factor(cancer$chemo)
+cancer$hormonal <- factor(cancer$hormonal)
+cancer$amputation <- factor(cancer$amputation)
+```
+
+
+```{r}
+# Perform one-hot encoding on age_group
+age_group_encoded <- model.matrix(~ age_group - 1, data = cancer)
+
+# Combine the encoded age_group with the original dataset
+cancer_encoded <- cbind(cancer, age_group_encoded)
+
+# Remove the original age_group column
+cancer_encoded <- subset(cancer_encoded, select = -c(age_group))
+cancer_encoded
+```
+
+```{r}
+# Create binary variables for Histtype
+histtype_levels <- unique(cancer_encoded$histtype)
+histtype_binary <- model.matrix(~ factor(histtype, levels = histtype_levels) - 1, data = cancer_encoded)
+colnames(histtype_binary) <- paste("histtype", histtype_levels, sep = "_")
+
+# Combine the binary variables with the original dataset
+cancer_encoded <- cbind(cancer_encoded, histtype_binary)
+
+# Create binary variables for Angioinv
+angioinv_levels <- unique(cancer_encoded$angioinv)
+angioinv_binary <- model.matrix(~ factor(angioinv, levels = angioinv_levels) - 1, data = cancer_encoded)
+colnames(angioinv_binary) <- paste("angioinv", angioinv_levels, sep = "_")
+
+# Combine the binary variables with the original dataset
+cancer_encoded <- cbind(cancer_encoded, angioinv_binary)
+
+# Create binary variables for Grade
+grade_levels <- unique(cancer_encoded$grade)
+grade_binary <- model.matrix(~ factor(grade, levels = grade_levels) - 1, data = cancer_encoded)
+colnames(grade_binary) <- paste("grade", grade_levels, sep = "_")
+
+# Combine the binary variables with the original dataset
+cancer_encoded <- cbind(cancer_encoded, grade_binary)
+
+# Create binary variables for Lymphinfil
+lymph_levels <- unique(cancer_encoded$lymphinfil)
+lymph_binary <- model.matrix(~ factor(lymphinfil, levels = lymph_levels) - 1, data = cancer_encoded)
+colnames(lymph_binary) <- paste("lymphinfil", lymph_levels, sep = "_")
+
+# Combine the binary variables with the original dataset
+cancer_encoded <- cbind(cancer_encoded, lymph_binary)
+cancer_encoded
+
+```
+### PREPROCESS DATA FOR FITTING THE MODEL!!!
+```{r}
+# Remove the original columns that have been encoded or binary
+cancer <- subset(cancer_encoded, select = -c(age, histtype, grade, angioinv, lymphinfil))
+# Standardize the feature "diam"
+cancer$diam<-scale(cancer$diam)
+cancer
+```
+
+
+CHECKING THE CORRELATION BETWEEN HISTTYPE_5 AND HISTTYPE_7
+```{r}
+# Boxplot of eventdeath vs histtype_5 and histtype_7
+par(mfrow = c(1, 2))
+boxplot(eventdeath ~ histtype_1,data = cancer, main = "Event Death vs Histtype 1", xlab = "Histtype 1", ylab = "Event Death")
+boxplot(eventdeath ~ histtype_2, data = cancer, main = "Event Death vs Histtype 2", xlab = "Histtype 2", ylab = "Event Death")
+boxplot(eventdeath ~ histtype_4, data = cancer, main = "Event Death vs Histtype 4", xlab = "Histtype 4", ylab = "Event Death")
+boxplot(eventdeath ~ histtype_5, data = cancer, main = "Event Death vs Histtype 5", xlab = "Histtype 5", ylab = "Event Death")
+boxplot(eventdeath ~ histtype_7, data = cancer, main = "Event Death vs Histtype 7", xlab = "Histtype 7", ylab = "Event Death")
+```
+Note that histtype_4, histtype_5, histtype_7 have a strong corellation, we drop the last two ones!!!
+=> 1 target variable and 21 predictors
+
+# 2. LOGISTIC REGRESSION (predict Pr of eventdeath = 1)
+```{r}
+# Define predictors and target variable
+target <- "eventdeath"
+
+# Define predictors as a vector
+predictors <- c(
+  "timerecurrence", "chemo", "hormonal", "amputation", "diam", "posnodes", 
+  "age_group25_29", "age_group30_34", "age_group35_39", "age_group40_44", "age_group45_49",  
+  "histtype_1", "histtype_2", "histtype_4", 
+  "angioinv_1", "angioinv_2",  
+  "grade_1", "grade_2",  
+  "lymphinfil_1", "lymphinfil_2", "esr1"
+)
+
+# Convert eventdeath to a factor
+cancer$eventdeath <- factor(cancer$eventdeath, levels = c(0, 1))
+```
+
+## a) Using 5-fold CV
+```{r}
+# Split data into train and test sets (80-20)
+set.seed(727094)
+train_index <- createDataPartition(cancer$eventdeath, p = 0.8, list = FALSE)
+train_data <- cancer[train_index, ]
+test_data <- cancer[-train_index, ]
+
+# Create formula for logistic regression
+formula <- as.formula(paste(target, "~", paste(predictors, collapse = "+")))
+
+# Perform logistic regression with 5-fold cross-validation on the training set
+set.seed(727094)  
+cv_model <- train(formula, data = train_data, method = "glm", trControl = trainControl(method = "cv", number = 5))
+
+
+# Print the cross-validated results
+print(cv_model)
+
+# Predicted probabilities of eventdeath = 1 on the test set
+probabilities <- predict(cv_model, newdata = test_data, type = "prob")
+
+# Convert probabilities to predicted class labels (0 or 1)
+predicted_labels <- ifelse(probabilities[, "1"] > 0.5, 1, 0)
+
+# Confusion matrix
+conf_matrix <- table(Actual=test_data$eventdeath,Predicted=predicted_labels)
+
+# Print confusion matrix
+print("Confusion Matrix for CV_model:")
+print(conf_matrix)
+
+# Calculate evaluation metrics on the test set
+true_positive <- conf_matrix[2, 2]
+true_negative <- conf_matrix[1, 1]
+false_positive <- conf_matrix[1, 2]
+false_negative <- conf_matrix[2, 1]
+
+# Accuracy
+accuracy <- (true_positive + true_negative) / sum(conf_matrix)
+
+# Precision
+precision <- true_positive / (true_positive + false_positive)
+
+# Recall (Sensitivity)
+recall <- true_positive / (true_positive + false_negative)
+
+# F1-score
+f1_score <- 2 * precision * recall / (precision + recall)
+
+# Area under the ROC curve (AUC-ROC)
+roc_auc <- roc(test_data$eventdeath, probabilities[, "1"])$auc
+
+# Print the evaluation metrics on the test set
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("Recall (Sensitivity):", round(recall, 4)))
+print(paste("F1-score:", round(f1_score, 4)))
+print(paste("AUC-ROC:", round(roc_auc, 4)))
+
+# Print the best model with all coefficients and p-values
+print(summary(cv_model$finalModel))
+plot(cv_model$finalModel)
+
+```
+
+### a1) Using 5 fold-CV with 5 repeats
+```{r}
+# Perform logistic regression with repeated 5-fold cross-validation on the training set
+set.seed(727094)
+cv_model2 <- train(formula, data = train_data, method = "glm", trControl = trainControl(method = "repeatedcv", number = 5, repeats = 5), metric = "Accuracy")
+
+# Print the cross-validated results
+print(cv_model2)
+
+# Find the best model
+best_model_index <- which.max(cv_model2$results$Accuracy)
+best_model <- cv_model2$finalModel
+
+# Predicted probabilities of eventdeath = 1 on the test set
+probabilities <- predict(cv_model2, newdata = test_data, type = "prob")
+
+# Convert probabilities to predicted class labels (0 or 1)
+predicted_labels <- ifelse(probabilities[, "1"] > 0.5, 1, 0)
+
+# Confusion matrix
+conf_matrix <- table(Actual = test_data$eventdeath, Predicted = predicted_labels)
+
+# Print confusion matrix
+print("Confusion Matrix for Best Model:")
+print(conf_matrix)
+
+# Calculate evaluation metrics on the test set
+true_positive <- conf_matrix[2, 2]
+true_negative <- conf_matrix[1, 1]
+false_positive <- conf_matrix[1, 2]
+false_negative <- conf_matrix[2, 1]
+
+# Accuracy
+accuracy <- (true_positive + true_negative) / sum(conf_matrix)
+
+# Precision
+precision <- true_positive / (true_positive + false_positive)
+
+# Recall (Sensitivity)
+recall <- true_positive / (true_positive + false_negative)
+
+# F1-score
+f1_score <- 2 * precision * recall / (precision + recall)
+
+# Area under the ROC curve (AUC-ROC)
+roc_auc <- pROC::roc(test_data$eventdeath, probabilities[, "1"])$auc
+
+# Print the evaluation metrics on the test set
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("Recall (Sensitivity):", round(recall, 4)))
+print(paste("F1-score:", round(f1_score, 4)))
+print(paste("AUC-ROC:", round(roc_auc, 4)))
+
+# Print the best model with all coefficients and p-values
+print(summary(cv_model2$finalModel))
+plot(cv_model2$finalModel)
+
+```
+### a2) Using 5 fold-CV with 5 repeated and weighted class
+```{r}
+# Create a vector of class weights
+class_weights <- ifelse(train_data$eventdeath == 1, sum(train_data$eventdeath == 0) / sum(train_data$eventdeath == 1), 1)
+
+# Perform logistic regression with repeated 5-fold cross-validation on the training set
+set.seed(727094)
+weighted_cv_model <- train(formula, data = train_data, method = "glm", trControl = trainControl(method = "repeatedcv", number = 5, repeats = 5), metric = "Accuracy", weights = class_weights)
+
+# Print the cross-validated results(cv_model)
+print
+
+# Find the best model
+best_model_index <- which.max(weighted_cv_model$results$Accuracy)
+best_model <- weighted_cv_model$finalModel
+
+# Predicted probabilities of eventdeath = 1 on the test set
+probabilities <- predict(weighted_cv_model, newdata = test_data, type = "prob")
+
+# Convert probabilities to predicted class labels (0 or 1)
+predicted_labels <- ifelse(probabilities[, "1"] > 0.5, 1, 0)
+
+# Confusion matrix
+conf_matrix <- table(Actual = test_data$eventdeath, Predicted = predicted_labels)
+
+# Print confusion matrix
+print("Confusion Matrix for Best Model:")
+print(conf_matrix)
+
+# Calculate evaluation metrics on the test set
+true_positive <- conf_matrix[2, 2]
+true_negative <- conf_matrix[1, 1]
+false_positive <- conf_matrix[1, 2]
+false_negative <- conf_matrix[2, 1]
+
+# Accuracy
+accuracy <- (true_positive + true_negative) / sum(conf_matrix)
+
+# Precision
+precision <- true_positive / (true_positive + false_positive)
+
+# Recall (Sensitivity)
+recall <- true_positive / (true_positive + false_negative)
+
+# F1-score
+f1_score <- 2 * precision * recall / (precision + recall)
+
+# Area under the ROC curve (AUC-ROC)
+roc_auc <- roc(test_data$eventdeath, probabilities[, "1"])$auc
+
+# Print the evaluation metrics on the test set
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("Recall (Sensitivity):", round(recall, 4)))
+print(paste("F1-score:", round(f1_score, 4)))
+print(paste("AUC-ROC:", round(roc_auc, 4)))
+
+# Print the best model with all coefficients and p-values
+print(summary(weighted_cv_model$finalModel))
+plot(weighted_cv_model$finalModel)
+```
+
+## b) Lasso (5 fold-CV)
+
+```{r}
+# Prepare data
+x <- model.matrix(formula, data = cancer) 
+y <- as.matrix(cancer[[target]])
+
+# Convert y to numeric type
+y <- as.numeric(y)
+
+# Set up lambda sequence
+lambda_seq <- seq(0.001, 0.5, by = 0.01)
+
+# Split data into train and test sets (80-20)
+set.seed(727094)
+train_index <- createDataPartition(y, p = 0.8, list = FALSE)
+x_train <- x[train_index, ]
+y_train <- y[train_index]
+x_test <- x[-train_index, ]
+y_test <- y[-train_index]
+
+# Create empty vectors to store metrics
+accuracy_vec <- precision_vec <- recall_vec <- f1_score_vec <- roc_auc_vec <- numeric(length(lambda_seq))
+
+
+# Perform Lasso regression with 5-fold cross-validation
+lasso_model <- cv.glmnet(x_train, y_train, alpha = 1, lambda = lambda_seq, nfolds = 5, type.measure = "class")
+
+
+# Find the best lambda value
+best_lambda <- lasso_model$lambda.min
+
+# Fit Lasso model with the best lambda value on the entire train set
+best_model <- glmnet(x_train, y_train, alpha = 1, lambda = best_lambda)
+
+# Predict probabilities of eventdeath = 1 using the best model on the test set
+probabilities <- predict(best_model, newx = x_test, s = best_lambda, type = "response")
+
+# Convert probabilities to predicted class labels (0 or 1)
+predicted_labels <- ifelse(probabilities > 0.5, 1, 0)
+
+# Calculate evaluation metrics using the best model on the test set
+true_positive <- sum(predicted_labels == 1 & y_test == 1)
+true_negative <- sum(predicted_labels == 0 & y_test == 0)
+false_positive <- sum(predicted_labels == 1 & y_test == 0)
+false_negative <- sum(predicted_labels == 0 & y_test == 1)
+
+# Accuracy
+accuracy <- (true_positive + true_negative) / length(predicted_labels)
+
+# Precision
+precision <- true_positive / (true_positive + false_positive)
+
+# Recall (Sensitivity)
+recall <- true_positive / (true_positive + false_negative)
+
+# F1-score
+f1_score <- 2 * precision * recall / (precision + recall)
+
+# Area under the ROC curve (AUC-ROC)
+roc_auc <- roc(y_test, probabilities)$auc
+
+# Calculate confusion matrix
+conf_matrix2 <- table(Actual = y_test, Predicted = predicted_labels)
+
+# Print confusion matrix
+print("Confusion Matrix:")
+print(conf_matrix2)
+
+# Print evaluation metrics
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("Recall (Sensitivity):", round(recall, 4)))
+print(paste("F1-score:", round(f1_score, 4)))
+print(paste("AUC-ROC:", round(roc_auc, 4)))
+
+# Print the best Lasso model
+print(best_model)
+
+# Extract coefficients
+lasso_coef <- predict(lasso_model, type = "coefficients", s = "lambda.min")[-1, ]
+
+# Get the names of important variables
+important_variables <- names(lasso_coef)[lasso_coef != 0]
+
+# Print the important variables
+print("Important Variables:")
+print(important_variables)
+
+
+# Plot
+plot(lasso_model)
+
+```
+### b1) Lasso with weighted class
+```{r}
+# Prepare data
+x <- model.matrix(formula, data = cancer) 
+y <- as.matrix(cancer[[target]])
+
+# Convert y to numeric type
+y <- as.numeric(y)
+
+# Set up lambda sequence
+lambda_seq <- seq(0.001, 0.5, by = 0.01)
+
+# Split data into train and test sets (80-20)
+set.seed(727094)
+train_index <- createDataPartition(y, p = 0.8, list = FALSE)
+x_train <- x[train_index, ]
+y_train <- y[train_index]
+x_test <- x[-train_index, ]
+y_test <- y[-train_index]
+
+# Calculate class weights
+class_weights <- ifelse(y_train == 1, sum(y_train == 0) / sum(y_train == 1), 1)
+
+# Perform Lasso regression with 5-fold cross-validation and weighted class
+weighted_lasso_model <- cv.glmnet(x_train, y_train, alpha = 1, lambda = lambda_seq, nfolds = 5, weights = class_weights)
+
+# Find the best lambda value
+best_lambda <- weighted_lasso_model$lambda.min
+
+# Fit Lasso model with the best lambda value on the entire train set
+best_model <- glmnet(x_train, y_train, alpha = 1, lambda = best_lambda, weights = class_weights)
+
+# Predict probabilities of eventdeath = 1 using the best model on the test set
+probabilities <- predict(best_model, newx = x_test, s = best_lambda, type = "response")
+
+# Convert probabilities to predicted class labels (0 or 1)
+predicted_labels <- ifelse(probabilities > 0.5, 1, 0)
+
+# Calculate evaluation metrics using the best model on the test set
+true_positive <- sum(predicted_labels == 1 & y_test == 1)
+true_negative <- sum(predicted_labels == 0 & y_test == 0)
+false_positive <- sum(predicted_labels == 1 & y_test == 0)
+false_negative <- sum(predicted_labels == 0 & y_test == 1)
+
+# Accuracy
+accuracy <- (true_positive + true_negative) / length(predicted_labels)
+
+# Precision
+precision <- true_positive / (true_positive + false_positive)
+
+# Recall (Sensitivity)
+recall <- true_positive / (true_positive + false_negative)
+
+# F1-score
+f1_score <- 2 * precision * recall / (precision + recall)
+
+# Area under the ROC curve (AUC-ROC)
+roc_auc <- roc(y_test, probabilities)$auc
+
+# Calculate confusion matrix
+conf_matrix <- table(Actual = y_test, Predicted = predicted_labels)
+
+# Print confusion matrix
+print("Confusion Matrix:")
+print(conf_matrix)
+
+# Print evaluation metrics
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("Recall (Sensitivity):", round(recall, 4)))
+print(paste("F1-score:", round(f1_score, 4)))
+print(paste("AUC-ROC:", round(roc_auc, 4)))
+
+# Print the best Lasso model
+print(best_model)
+
+# Extract coefficients
+lasso_coef <- predict(lasso_model, type = "coefficients", s = "lambda.min")[-1, ]
+
+# Get the names of important variables
+important_variables <- names(lasso_coef)[lasso_coef != 0]
+
+# Print the important variables
+print("Important Variables:")
+print(important_variables)
+
+# Plot
+plot(weighted_lasso_model)
+
+```
+
+## c) Ridge
+```{r}
+# Prepare data
+x <- model.matrix(formula, data = cancer) 
+y <- as.matrix(cancer[[target]])
+
+# Convert y to numeric type
+y <- as.numeric(y)
+
+# Set up lambda sequence
+lambda_seq <- seq(0.001, 0.5, by = 0.01)
+
+# Split data into train and test sets (80-20)
+set.seed(727094)
+train_index <- createDataPartition(y, p = 0.8, list = FALSE)
+x_train <- x[train_index, ]
+y_train <- y[train_index]
+x_test <- x[-train_index, ]
+y_test <- y[-train_index]
+
+# Create empty vectors to store metrics
+accuracy_vec <- precision_vec <- recall_vec <- f1_score_vec <- roc_auc_vec <- numeric(length(lambda_seq))
+
+# Perform Ridge regression with lambda sequence
+for (i in seq_along(lambda_seq)) {
+  # Fit Ridge model with 5-fold cross-validation on train set
+  ridge_model <- glmnet(x_train, y_train, alpha = 0, lambda = lambda_seq[i])
+  
+  # Predict probabilities of eventdeath = 1 on the test set
+  probabilities <- predict(ridge_model, newx = x_test, s = "lambda.min", type = "response")
+  
+  # Convert probabilities to predicted class labels (0 or 1)
+  predicted_labels <- ifelse(probabilities > 0.5, 1, 0)
+  
+  # Calculate evaluation metrics
+  true_positive <- sum(predicted_labels == 1 & y_test == 1)
+  true_negative <- sum(predicted_labels == 0 & y_test == 0)
+  false_positive <- sum(predicted_labels == 1 & y_test == 0)
+  false_negative <- sum(predicted_labels == 0 & y_test == 1)
+  
+  # Accuracy
+  accuracy <- (true_positive + true_negative) / length(predicted_labels)
+  
+  # Precision
+  precision <- true_positive / (true_positive + false_positive)
+  
+  # Recall (Sensitivity)
+  recall <- true_positive / (true_positive + false_negative)
+  
+  # F1-score
+  f1_score <- 2 * precision * recall / (precision + recall)
+  
+  # Area under the ROC curve (AUC-ROC)
+  roc_auc <- roc(y_test, probabilities)$auc
+  
+  # Store metrics
+  accuracy_vec[i] <- accuracy
+  precision_vec[i] <- precision
+  recall_vec[i] <- recall
+  f1_score_vec[i] <- f1_score
+  roc_auc_vec[i] <- roc_auc
+}
+
+# Find the lambda value that gives the maximum mean cross-validated accuracy
+best_lambda <- lambda_seq[which.max(accuracy_vec)]
+
+# Fit Lasso model with the best lambda value on the entire train set
+best_model <- glmnet(x_train, y_train, alpha = 0, lambda = best_lambda)
+
+# Predict probabilities of eventdeath = 1 using the best model on the test set
+probabilities <- predict(best_model, newx = x_test, s = "lambda.min", type = "response")
+
+# Convert probabilities to predicted class labels (0 or 1)
+predicted_labels <- ifelse(probabilities > 0.5, 1, 0)
+
+# Calculate evaluation metrics using the best model on the test set
+true_positive <- sum(predicted_labels == 1 & y_test == 1)
+true_negative <- sum(predicted_labels == 0 & y_test == 0)
+false_positive <- sum(predicted_labels == 1 & y_test == 0)
+false_negative <- sum(predicted_labels == 0 & y_test == 1)
+
+# Accuracy
+accuracy <- (true_positive + true_negative) / length(predicted_labels)
+
+# Precision
+precision <- true_positive / (true_positive + false_positive)
+
+# Recall (Sensitivity)
+recall <- true_positive / (true_positive + false_negative)
+
+# F1-score
+f1_score <- 2 * precision * recall / (precision + recall)
+
+# Area under the ROC curve (AUC-ROC)
+roc_auc <- roc(y_test, probabilities)$auc
+
+# Calculate confusion matrix
+conf_matrix <- table(Actual=y_test,Predict=predicted_labels)
+# Print confusion matrix
+print("Confusion Matrix:")
+print(conf_matrix)
+
+# Print evaluation metrics
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("Recall (Sensitivity):", round(recall, 4)))
+print(paste("F1-score:", round(f1_score, 4)))
+print(paste("AUC-ROC:", round(roc_auc, 4)))
+
+# Print the best Ridge model
+print(best_model)
+
+# Print the best lambda
+print(paste("Best Lambda:", best_lambda))
+
+# Create a data frame for evaluation metrics
+metrics_df <- data.frame(Lambda = lambda_seq,
+                         Accuracy = accuracy_vec,
+                         Precision = precision_vec,
+                         Recall = recall_vec,
+                         F1_Score = f1_score_vec,
+                         AUC_ROC = roc_auc_vec)
+
+# Melt the data frame for plotting
+metrics_melted <- melt(metrics_df, id.vars = "Lambda", variable.name = "Metric", value.name = "Value")
+
+# Plot
+library(ggplot2)
+ggplot(metrics_melted, aes(x = Lambda, y = Value, color = Metric, group = Metric)) +
+  geom_line() +
+  labs(title = "Ridge: Lambda vs. Evaluation Metrics", x = "Lambda",
+       y = "Value", color = "Metric") +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+```
+### c1) Ridge with weighted class
+```{r}
+# Prepare data
+x <- model.matrix(formula, data = cancer) 
+y <- as.matrix(cancer[[target]])
+
+# Convert y to numeric type
+y <- as.numeric(y)
+
+# Set up lambda sequence
+lambda_seq <- seq(0.001, 0.5, by = 0.01)
+
+# Split data into train and test sets (80-20)
+set.seed(727094)
+train_index <- createDataPartition(y, p = 0.8, list = FALSE)
+x_train <- x[train_index, ]
+y_train <- y[train_index]
+x_test <- x[-train_index, ]
+y_test <- y[-train_index]
+
+# Create empty vectors to store metrics
+accuracy_vec <- precision_vec <- recall_vec <- f1_score_vec <- roc_auc_vec <- numeric(length(lambda_seq))
+
+# Define class weights
+class_weights <- ifelse(y_train == 1, sum(y_train == 0) / sum(y_train == 1), 1)
+
+# Perform Ridge regression with 5-fold cross-validation and class weights
+weighted_ridge_model <- cv.glmnet(x_train, y_train, alpha = 0, lambda = lambda_seq, nfolds = 5, weights = class_weights)
+
+# Find the best lambda value
+best_lambda <- weighted_ridge_model$lambda.min
+
+# Fit Ridge model with the best lambda value on the entire train set
+best_model <- glmnet(x_train, y_train, alpha = 0, lambda = best_lambda, weights = class_weights)
+
+# Predict probabilities of eventdeath = 1 using the best model on the test set
+probabilities <- predict(best_model, newx = x_test, s = best_lambda, type = "response")
+
+# Convert probabilities to predicted class labels (0 or 1)
+predicted_labels <- ifelse(probabilities > 0.5, 1, 0)
+
+# Calculate evaluation metrics using the best model on the test set
+true_positive <- sum(predicted_labels == 1 & y_test == 1)
+true_negative <- sum(predicted_labels == 0 & y_test == 0)
+false_positive <- sum(predicted_labels == 1 & y_test == 0)
+false_negative <- sum(predicted_labels == 0 & y_test == 1)
+
+# Accuracy
+accuracy <- (true_positive + true_negative) / length(predicted_labels)
+
+# Precision
+precision <- true_positive / (true_positive + false_positive)
+
+# Recall (Sensitivity)
+recall <- true_positive / (true_positive + false_negative)
+
+# F1-score
+f1_score <- 2 * precision * recall / (precision + recall)
+
+# Area under the ROC curve (AUC-ROC)
+roc_auc <- roc(y_test, probabilities)$auc
+
+# Calculate confusion matrix
+conf_matrix <- table(Actual = y_test, Predicted = predicted_labels)
+
+# Print confusion matrix
+print("Confusion Matrix:")
+print(conf_matrix)
+
+# Print evaluation metrics
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("Recall (Sensitivity):", round(recall, 4)))
+print(paste("F1-score:", round(f1_score, 4)))
+print(paste("AUC-ROC:", round(roc_auc, 4)))
+
+# Print the best Ridge model
+print(best_model)
+
+# Print the best lambda
+print(paste("Best Lambda:", best_lambda))
+
+# Plot
+plot(weighted_ridge_model)
+
+# Plot
+library(ggplot2)
+ggplot(metrics_melted, aes(x = Lambda, y = Value, color = Metric, group = Metric)) +
+  geom_line() +
+  labs(title = "Ridge: Lambda vs. Evaluation Metrics", x = "Lambda",
+       y = "Value", color = "Metric") +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+```
+
+# 3. SUPPORT VECTOR MACHINE
+## 3.1 Linear SVM
+```{r cache=TRUE}
+# Create formula for logistic regression
+formula <- as.formula(paste(target, "~", paste(predictors, collapse = "+")))
+
+# Set up the grid of tuning parameters
+tuneGrid <- expand.grid(C = seq(0.01, 0.5, by = 0.01))
+
+# Initialize empty dataframe to store results
+results_df <- data.frame(C = numeric(), Accuracy = numeric(), Precision = numeric(), Recall = numeric(), F1_Score = numeric(), AUC_ROC = numeric())
+
+# Perform grid search with 5-fold cross-validation (repeated)
+for (c_value in tuneGrid$C) {
+  set.seed(727094)
+  linear_svm_model <- train(formula, data = train_data, method = "svmLinear", trControl = trainControl(method = "repeatedcv", number = 5, repeats = 5), tuneGrid = data.frame(C = c_value))
+  
+  # Make predictions on the test set
+  predictions <- predict(linear_svm_model, newdata = test_data)
+  
+  # Calculate evaluation metrics
+  TP <- sum(predictions == 1 & test_data$eventdeath == 1)
+  TN <- sum(predictions == 0 & test_data$eventdeath == 0)
+  FP <- sum(predictions == 1 & test_data$eventdeath == 0)
+  FN <- sum(predictions == 0 & test_data$eventdeath == 1)
+  
+  # Accuracy
+  accuracy <- (TP + TN) / length(predictions)
+  
+  # Precision
+  precision <- TP / (TP + FP)
+  
+  # Recall (Sensitivity)
+  recall <- TP / (TP + FN)
+  
+  # F1-score
+  f1_score <- 2 * precision * recall / (precision + recall)
+  
+  # Area under the ROC curve (AUC-ROC)
+  roc_auc <- roc(test_data$eventdeath, as.numeric(predictions))$auc
+  
+  # Add results to dataframe
+  results_df <- rbind(results_df, data.frame(C = c_value, Accuracy = accuracy, Precision = precision, Recall = recall, F1_Score = f1_score, AUC_ROC = roc_auc))
+}
+
+# Print the best parameter
+best_c <- results_df[which.max(results_df$Accuracy), ]
+print("Best Parameter:")
+print(best_c)
+
+# Print the best model
+print("Best Model:")
+print(linear_svm_model$finalModel)
+
+```
+
+
+```{r}
+# Plot metrics vs. C
+# Melt the dataframe for easier plotting
+melted_results2 <- melt(results_df, id.vars = "C", variable.name = "Metric")
+
+# Plotting
+ggplot(melted_results2, aes(x = C, y = value, color = Metric)) +
+  geom_line() +
+  labs(title = "Linear SVM: Performance Metrics vs. C",
+       x = "Parameter C",
+       y = "Value") +
+  scale_color_discrete(name = "Metric") +
+  theme_minimal()
+
+```
+## 3.2 Non-linear SVM
+
+```{r cache=TRUE}
+# Set up the grid of tuning parameters
+tuneGrid <- expand.grid(C = seq(0.01, 0.5, by = 0.01), sigma = seq(0.01, 0.1, by = 0.01))
+
+# Initialize empty dataframe to store results
+results_df <- data.frame(C = numeric(), Sigma = numeric(), Accuracy = numeric(), Precision = numeric(), Recall = numeric(), F1_Score = numeric(), AUC_ROC = numeric())
+
+# Perform grid search with 5-fold cross-validation (repeated)
+for (i in 1:nrow(tuneGrid)) {
+  c_value <- tuneGrid$C[i]
+  sigma_value <- tuneGrid$sigma[i]
+  
+  set.seed(727094)
+  nonlinear_svm_model <- train(formula, data = train_data, method = "svmRadial", trControl = trainControl(method = "repeatedcv", number = 5, repeats = 5), tuneGrid = data.frame(C = c_value, sigma = sigma_value))
+  
+  # Make predictions on the test set
+  predictions <- predict(nonlinear_svm_model, newdata = test_data)
+  
+  # Calculate evaluation metrics
+  TP <- sum(predictions == 1 & test_data$eventdeath == 1)
+  TN <- sum(predictions == 0 & test_data$eventdeath == 0)
+  FP <- sum(predictions == 1 & test_data$eventdeath == 0)
+  FN <- sum(predictions == 0 & test_data$eventdeath == 1)
+  
+  # Accuracy
+  accuracy <- (TP + TN) / length(predictions)
+  
+  # Precision
+  precision <- TP / (TP + FP)
+  
+  # Recall (Sensitivity)
+  recall <- TP / (TP + FN)
+  
+  # F1-score
+  f1_score <- 2 * precision * recall / (precision + recall)
+  
+  # Area under the ROC curve (AUC-ROC)
+  roc_auc <- roc(test_data$eventdeath, as.numeric(predictions))$auc
+  
+  # Add results to dataframe
+  results_df <- rbind(results_df, data.frame(C = c_value, Sigma = sigma_value, Accuracy = accuracy, Precision = precision, Recall = recall, F1_Score = f1_score, AUC_ROC = roc_auc))
+}
+
+# Print the best parameter
+best_c <- results_df[which.max(results_df$Accuracy), ]
+print("Best Parameter:")
+print(best_c)
+
+# Print the best model
+print("Best Model:")
+print(nonlinear_svm_model$finalModel)
+
+```
+```{r}
+# Melt the dataframe for easier plotting
+melted_results <- melt(results_df, id.vars = c("C", "Sigma"), variable.name = "Metric")
+
+# Plotting
+ggplot(melted_results, aes(x = C, y = value, group = Metric, color = Metric)) +
+  geom_line() +
+  labs(title = "Non-linear SVM: Performance Metrics vs. C",
+       x = "C",
+       y = "Value") +
+  scale_color_discrete(name = "Metric") +
+  theme_minimal()
+
+```
+# 4. RANDOM FOREST
+```{r}
+# Create formula for random forest
+formula <- as.formula(paste(target, "~", paste(predictors, collapse = "+")))
+
+# Random Forest with 5-fold cross-validation on train set
+set.seed(727094)
+rf_model <- train(formula, data = train_data, method = "rf", trControl = trainControl(method = "repeatedcv", number = 5,repeats = 5))
+
+# Print the best model
+print(rf_model)
+
+# Print the variable importance
+print(varImp(rf_model))
+
+# Predict on test set
+predicted_labels <- predict(rf_model, newdata = test_data)
+# Predicted probabilities of eventdeath = 1 on the test set
+probabilities <- predict(rf_model, newdata = test_data, type = "prob")
+
+# Convert probabilities to predicted class labels (0 or 1)
+predicted_labels <- ifelse(probabilities[, "1"] > 0.5, 1, 0)
+
+
+# Calculate evaluation metrics
+true_positive <- sum(predicted_labels == 1 & test_data$eventdeath == 1)
+true_negative <- sum(predicted_labels == 0 & test_data$eventdeath == 0)
+false_positive <- sum(predicted_labels == 1 & test_data$eventdeath == 0)
+false_negative <- sum(predicted_labels == 0 & test_data$eventdeath == 1)
+
+# Accuracy
+accuracy <- (true_positive + true_negative) / nrow(test_data)
+
+# Precision
+precision <- true_positive / (true_positive + false_positive)
+
+# Recall (Sensitivity)
+recall <- true_positive / (true_positive + false_negative)
+
+# F1-score
+f1_score <- 2 * precision * recall / (precision + recall)
+
+# Area under the ROC curve (AUC-ROC)
+roc_auc <- roc(test_data$eventdeath, probabilities[, "1"])$auc
+
+# Confusion matrix
+conf_matrix <- table(Actual = test_data$eventdeath, Predicted = predicted_labels)
+print(conf_matrix)
+
+# Print evaluation metrics
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("Recall (Sensitivity):", round(recall, 4)))
+print(paste("F1-score:", round(f1_score, 4)))
+print(paste("AUC-ROC:", round(roc_auc, 4)))
+
+plot(rf_model)
+```
+
+# 5. GBM
+```{r}
+# Create formula for GBM
+formula <- as.formula(paste(target, "~", paste(predictors, collapse = "+")))
+
+# GBM with 5-fold cross-validation on train set
+set.seed(727094)
+gbm_model <- train(formula, data = train_data, method = "gbm", trControl = trainControl(method = "repeatedcv", number = 5, repeats = 5))
+
+# Print the best model
+print(gbm_model)
+
+# Print the variable importance
+print(varImp(gbm_model))
+
+# Predict on test set
+predicted_labels <- predict(gbm_model, newdata = test_data)
+
+# Predicted probabilities of eventdeath = 1 on the test set
+probabilities <- predict(gbm_model, newdata = test_data, type = "prob")
+
+# Convert probabilities to predicted class labels (0 or 1)
+predicted_labels <- ifelse(probabilities[, "1"] > 0.5, 1, 0)
+
+# Calculate evaluation metrics
+true_positive <- sum(predicted_labels == 1 & test_data$eventdeath == 1)
+true_negative <- sum(predicted_labels == 0 & test_data$eventdeath == 0)
+false_positive <- sum(predicted_labels == 1 & test_data$eventdeath == 0)
+false_negative <- sum(predicted_labels == 0 & test_data$eventdeath == 1)
+
+# Accuracy
+accuracy <- (true_positive + true_negative) / nrow(test_data)
+
+# Precision
+precision <- true_positive / (true_positive + false_positive)
+
+# Recall (Sensitivity)
+recall <- true_positive / (true_positive + false_negative)
+
+# F1-score
+f1_score <- 2 * precision * recall / (precision + recall)
+
+# Area under the ROC curve (AUC-ROC)
+roc_auc <- roc(test_data$eventdeath, probabilities[, "1"])$auc
+
+# Confusion matrix
+conf_matrix <- table(Actual = test_data$eventdeath, Predicted = predicted_labels)
+print(conf_matrix)
+
+# Print evaluation metrics
+print(paste("Accuracy:", round(accuracy, 4)))
+print(paste("Precision:", round(precision, 4)))
+print(paste("Recall (Sensitivity):", round(recall, 4)))
+print(paste("F1-score:", round(f1_score, 4)))
+print(paste("AUC-ROC:", round(roc_auc, 4)))
+
+plot(gbm_model)
+
+```
+
+
+
+
